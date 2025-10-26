@@ -1,82 +1,78 @@
-"""PyFSD MetarFetcher plugin :: awc_metar.py
-Version: 5
-"""
-from datetime import datetime
-from gzip import open as open_gzip
-from typing import Optional
-from urllib.error import ContentTooShortError, HTTPError, URLError
-from urllib.request import urlopen
-from xml.etree.ElementTree import ParseError
-from xml.etree.ElementTree import parse as parseXml
+"""MetarFetcher plugin, awc_metar.py, 6, 1.1.1."""
 
-from metar.Metar import Metar
-from pyfsd.metar.fetch import IMetarFetcher, MetarInfoDict, MetarNotAvailableError
-from twisted.plugin import IPlugin
-from zope.interface import implementer
+from asyncio import get_event_loop
+from gzip import decompress
+from typing import TYPE_CHECKING
+from xml.etree.ElementTree import ParseError, fromstring
+
+from aiohttp import ClientSession
+from dependency_injector.wiring import Provide, inject
+
+from pyfsd.dependencies import Container
+from pyfsd.metar.fetch import MetarInfoDict
+from pyfsd.metar.profile import WeatherProfile
+from pyfsd.plugin import SimplePlugin
+
+if TYPE_CHECKING:
+    from pyfsd.metar.manager import MetarManager, PyFSDMetarConfig
 
 
-@implementer(IPlugin, IMetarFetcher)
-class AWCMetarFetcher:
-    metar_source = "aviationweather"
+pyfsd_plugin = SimplePlugin("awc_metar", (5, 0), (6, "1.1.1"), None)
 
-    def fetch(self, _: dict, icao: str) -> Optional[Metar]:
+
+@pyfsd_plugin.setuper
+@inject
+async def register_fetcher(
+    metar_manager: "MetarManager" = Provide[Container.metar_manager],
+) -> None:
+    metar_manager.register_once_fetcher("aviationweather", fetch)
+    metar_manager.register_cron_fetcher("aviationweather", fetch_all)
+
+
+async def fetch(
+    config: "dict | PyFSDMetarConfig", icao: str
+) -> "WeatherProfile | None":
+    async with (
+        ClientSession() as session,
+        session.get(
+            f"https://aviationweather.gov/cgi-bin/data/metar.php?ids={icao}"
+        ) as resp,
+    ):
+        if resp.status != 200:
+            return None
+        lines = (await resp.text("ascii", "ignore")).splitlines()
+        if not lines:
+            return None
+        return WeatherProfile(lines[0].rstrip("\n"))
+
+
+async def fetch_all(config: "dict | PyFSDMetarConfig") -> "MetarInfoDict | None":
+    async with (
+        ClientSession() as session,
+        session.get(
+            "https://aviationweather.gov/data/cache/metars.cache.xml.gz"
+        ) as resp,
+    ):
+        if resp.status != 200:
+            return None
         try:
-            with urlopen(
-                f"https://beta.aviationweather.gov/cgi-bin/data/metar.php?ids={icao}"
-            ) as file:
-                lines = file.readlines()
-                if not lines:
-                    return None
-                else:
-                    return Metar(
-                        lines[0].decode("ascii", "ignore").rstrip("\n"), strict=False
-                    )
-        except (ContentTooShortError, HTTPError, URLError):
+            root = fromstring(decompress(await resp.read()))
+        except ParseError:
             return None
 
-    def fetchAll(self, _: dict) -> MetarInfoDict:
-        try:
-            result = {}
-            with urlopen(
-                "https://beta.aviationweather.gov/data/cache/metars.cache.xml.gz"
-            ) as gzip_file:
-                with open_gzip(gzip_file) as file:
-                    try:
-                        root = parseXml(file).getroot()
-                    except ParseError:
-                        raise MetarNotAvailableError
-                    data = root.find("data")
-                    if data is None:
-                        raise MetarNotAvailableError
+        data_section = root.find("data")
+        if data_section is None:
+            return None
 
-                    for metar in data:
-                        observation_time = metar.findtext("observation_time")
-                        station_id = metar.findtext("station_id")
-                        raw_text = metar.findtext("raw_text")
-                        if (
-                            observation_time is None
-                            or station_id is None
-                            or raw_text is None
-                        ):
-                            continue
-                        try:
-                            metar_date = datetime.fromisoformat(
-                                observation_time[:-1]
-                                if observation_time.startswith("Z")
-                                else observation_time
-                            )
-                            opt = {"month": metar_date.month, "year": metar_date.year}
-                        except ValueError:
-                            opt = {}
+        def parse() -> MetarInfoDict:
+            result: MetarInfoDict = {}
+            for metar in data_section:
+                station_id = metar.findtext("station_id")
+                raw_text = metar.findtext("raw_text")
+                if station_id is None or raw_text is None:
+                    continue
 
-                        result[station_id] = Metar(
-                            raw_text,
-                            strict=False,
-                            **opt,
-                        )
+                result[station_id] = WeatherProfile(raw_text)
             return result
-        except (ContentTooShortError, HTTPError, URLError):
-            raise MetarNotAvailableError
 
-
-fetcher = AWCMetarFetcher()
+        return await get_event_loop().run_in_executor(None, parse)

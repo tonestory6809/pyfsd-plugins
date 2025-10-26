@@ -1,50 +1,47 @@
-"""PyFSD MetarFetcher plugin :: xmairavt7_metar.py
-Version: 3
-"""
-from html.parser import HTMLParser
-from typing import NoReturn, Optional
-from urllib.error import ContentTooShortError, HTTPError, URLError
-from urllib.request import urlopen
+"""MetarFetcher plugin, xmairavt7_metar.py, 8, 1.2."""
 
-from metar.Metar import Metar
-from pyfsd.metar.fetch import IMetarFetcher
-from twisted.plugin import IPlugin
-from zope.interface import implementer
+from html.parser import HTMLParser
+from typing import TYPE_CHECKING, Optional
+
+from aiohttp import ClientSession
+from dependency_injector.wiring import Provide, inject
+
+from pyfsd.dependencies import Container
+from pyfsd.metar.profile import WeatherProfile
+from pyfsd.plugin import SimplePlugin
+
+if TYPE_CHECKING:
+    from pyfsd.metar.manager import MetarManager, PyFSDMetarConfig
 
 
 class MetarPageParser(HTMLParser):
     metar_text: Optional[str] = None
 
     def handle_data(self, data: str) -> None:
-        if self.lasttag == "font":
-            if data.startswith("METAR "):
-                assert self.metar_text is None
-                self.metar_text = data[6:]
-            elif data.startswith("SPECI "):
-                assert self.metar_text is None
-                self.metar_text = data[6:]
+        if self.lasttag == "font" and data.startswith(("METAR ", "SPECI ")):
+            self.metar_text = data[6:]
 
 
-@implementer(IPlugin, IMetarFetcher)
-class XMAirAVT7MetarFetcher:
-    metar_source = "xmairavt7"
-
-    def fetch(self, _: dict, icao: str) -> Optional[Metar]:
-        try:
-            with urlopen(
-                f"http://xmairavt7.xiamenair.com/WarningPage?WarningAirports={icao}"
-            ) as html_file:
-                parser = MetarPageParser()
-                parser.feed(html_file.read().decode())
-                if parser.metar_text is None:
-                    return None
-                else:
-                    return Metar(parser.metar_text, strict=False)
-        except (ContentTooShortError, HTTPError, URLError):
+async def fetch(_: "PyFSDMetarConfig | dict", icao: str) -> Optional[WeatherProfile]:
+    async with (
+        ClientSession() as session,
+        session.get(
+            f"http://xmairavt7.xiamenair.com/WarningPage?WarningAirports={icao}"
+        ) as resp,
+    ):
+        parser = MetarPageParser()
+        parser.feed(await resp.text(errors="ignore"))
+        if parser.metar_text is None:
             return None
-
-    def fetchAll(self, _: dict) -> NoReturn:
-        raise NotImplementedError
+        return WeatherProfile(parser.metar_text)
 
 
-fetcher = XMAirAVT7MetarFetcher()
+pyfsd_plugin = SimplePlugin("xmairavt7_metar", (5, 0), (8, "1.2"), None)
+
+
+@pyfsd_plugin.setuper
+@inject
+async def register(
+    metar_manager: "MetarManager" = Provide[Container.metar_manager],
+) -> None:
+    metar_manager.register_once_fetcher("xmairavt7", fetch)
