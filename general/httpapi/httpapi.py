@@ -1,11 +1,9 @@
 """General plugin, httpapi.py, 4, 0.1.2."""
 
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from json import JSONDecodeError, loads
 from typing import (
     TYPE_CHECKING,
-    Callable,
-    Optional,
     TypeVar,
     cast,
 )
@@ -32,7 +30,7 @@ C = TypeVar("C", bound=Callable)
 hasher = PasswordHasher()
 
 
-def check(auth: bool = False, body_format: Optional[dict] = None) -> Callable[[C], C]:
+def check(auth: bool = False, body_format: dict | None = None) -> Callable[[C], C]:
     """Annotate a handler."""
 
     def decorator(func: C) -> C:
@@ -290,18 +288,12 @@ async def delete_user(
     raise web.HTTPNoContent
 
 
-app.add_routes(routes)
-
-
 # =============== Launcher
 pyfsd_plugin = SimplePlugin(
     "httpapi",
     (5, 0),
-    (4, "0.1.2"),
-    {
-        "port": int,
-        "token": str,
-    },
+    (5, "0.1.3"),
+    {"port": int, "token": str, "enable_default_api": bool},
 )
 runner: "web.AppRunner | None" = None
 
@@ -312,6 +304,8 @@ async def run(config: dict = Provide[Container.config]) -> None:
     global plugin_config, runner
     plugin_config = config["plugin"]["httpapi"]
 
+    if plugin_config["enable_default_api"]:
+        app.add_routes(routes)
     runner = web.AppRunner(app, access_log=logger)
     await runner.setup()
     site = web.TCPSite(

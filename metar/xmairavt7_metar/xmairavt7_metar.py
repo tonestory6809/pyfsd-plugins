@@ -1,7 +1,7 @@
 """MetarFetcher plugin, xmairavt7_metar.py, 8, 1.2."""
 
 from html.parser import HTMLParser
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from aiohttp import ClientSession
 from dependency_injector.wiring import Provide, inject
@@ -15,14 +15,14 @@ if TYPE_CHECKING:
 
 
 class MetarPageParser(HTMLParser):
-    metar_text: Optional[str] = None
+    metar_text: str | None = None
 
     def handle_data(self, data: str) -> None:
         if self.lasttag == "font" and data.startswith(("METAR ", "SPECI ")):
             self.metar_text = data[6:]
 
 
-async def fetch(_: "PyFSDMetarConfig | dict", icao: str) -> Optional[WeatherProfile]:
+async def fetch(_: "PyFSDMetarConfig | dict", icao: str) -> WeatherProfile | None:
     async with (
         ClientSession() as session,
         session.get(

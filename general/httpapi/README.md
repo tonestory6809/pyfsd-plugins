@@ -6,6 +6,7 @@
 [plugin.httpapi]
 port = 端口(整数,例:8080)
 token = 敏感API鉴权用的token(文字,例:j9AeC46KpbsljcTBXx_p_iacIP0TfFqRUUgGK4grT54(请勿沿用!))
+enable_default_api = 是否启用默认的api端点(如下述,布尔值)
 ```
 
 ## API

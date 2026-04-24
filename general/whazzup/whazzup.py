@@ -8,7 +8,7 @@ from dependency_injector.wiring import Provide, inject
 
 from pyfsd.define.utils import asyncify
 from pyfsd.dependencies import Container
-from pyfsd.plugin import EventResult, PreventEvent, SimplePlugin
+from pyfsd.plugin import PreventEvent, SimplePlugin
 
 if TYPE_CHECKING:
     from aiohttp.web import Request, Response
@@ -47,14 +47,14 @@ class WhazzupEncoder(JSONEncoder):
 @pyfsd_plugin.audit("new_client_created")
 async def fetch_atis(protocol: "ClientProtocol") -> None:
     """Ask new ATCs send their ATISs."""
-    if protocol.client and protocol.client.type == "ATC":
+    if protocol.client and protocol.client.is_controller:
         protocol.send_line(b"$CQatis_collector:%s:ATIS" % protocol.client.callsign)
 
 
 @pyfsd_plugin.audit("client_disconnected")
 async def clear_atis(_: "ClientProtocol", client: Optional["Client"]) -> None:
     """Remove ATCs' ATISs that are disconnected."""
-    if client and client.type == "ATC" and client.callsign in atis:
+    if client and client.is_controller and client.callsign in atis:
         del atis[client.callsign]
 
 
@@ -135,7 +135,7 @@ def generate_whazzup(
             lat, lon = client.position
             client_info["latitude"] = lat
             client_info["longitude"] = lon
-            if client.type == "PILOT":
+            if not client.is_controller:
                 client_info["altitude"] = client.altitude
                 if heading_instead_pbh:
                     # https://github.com/xpilot-project/xpilot \
@@ -150,7 +150,7 @@ def generate_whazzup(
                 else:
                     client_info["pbh"] = client.pbh
 
-        if client.type == "PILOT":
+        if not client.is_controller:
             client_info["groundspeed"] = client.ground_speed
             client_info["transponder"] = f"{client.transponder:04d}"
             if client.flight_plan is not None:
@@ -181,9 +181,7 @@ def generate_whazzup(
             if client.callsign in atis:
                 client_info["atis"] = atis[client.callsign]
 
-        whazzup["pilot" if client.type == "PILOT" else "controllers"].append(
-            client_info
-        )
+        whazzup["controllers" if client.is_controller else "pilot"].append(client_info)
     return whazzup
 
 
