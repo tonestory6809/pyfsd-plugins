@@ -1,11 +1,14 @@
 """General plugin, whazzup.py, 3, 0.1.0."""
 
-from datetime import datetime
+import asyncio
+from datetime import datetime, timezone
 from json import JSONEncoder, dumps
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from dependency_injector.wiring import Provide, inject
 
+from pyfsd.define.protocol import FSDClientCommand
+from pyfsd.define.protocol.packet import MulticastPacket, ServerBoundPacket
 from pyfsd.define.utils import asyncify
 from pyfsd.dependencies import Container
 from pyfsd.plugin import PreventEvent, SimplePlugin
@@ -13,16 +16,17 @@ from pyfsd.plugin import PreventEvent, SimplePlugin
 if TYPE_CHECKING:
     from aiohttp.web import Request, Response
 
-    from pyfsd.factory.client import ClientFactory
-    from pyfsd.object.client import Client
-    from pyfsd.protocol.client import ClientProtocol
+    from pyfsd.client.net.factory import ClientFactory
+    from pyfsd.client.object import Client
+    from pyfsd.client.session import ClientSession
+    from pyfsd.plugin.manager import PluginManager
 
 
 atis: dict[bytes, list[bytes]] = {}
 pyfsd_plugin = SimplePlugin(
     "whazzup",
     (5, 0),
-    (3, "0.1.0"),
+    (4, "0.2.0"),
     {
         "use_heading": bool,
         "client_coding": str,
@@ -45,21 +49,58 @@ class WhazzupEncoder(JSONEncoder):
 
 
 @pyfsd_plugin.audit("new_client_created")
-async def fetch_atis(protocol: "ClientProtocol") -> None:
+async def fetch_atis(client: "Client") -> None:
     """Ask new ATCs send their ATISs."""
-    if protocol.client and protocol.client.is_controller:
-        protocol.send_line(b"$CQatis_collector:%s:ATIS" % protocol.client.callsign)
+    if client.is_controller:
+        client.session.send_packets(
+            MulticastPacket(
+                FSDClientCommand.CLIENT_QUERY,
+                b"atis_collector",
+                client.callsign,
+                b"ATIS",
+            )
+        )
 
 
 @pyfsd_plugin.audit("client_disconnected")
-async def clear_atis(_: "ClientProtocol", client: Optional["Client"]) -> None:
+async def clear_atis(_: "ClientSession", client: "Client | None") -> None:
     """Remove ATCs' ATISs that are disconnected."""
     if client and client.is_controller and client.callsign in atis:
         del atis[client.callsign]
 
 
-@pyfsd_plugin.handle("line_received_from_client")
-async def collect_atis(protocol: "ClientProtocol", line: bytes) -> None:
+# ========== new atis debouncer
+lock = asyncio.Lock()
+notify_tasks: dict[bytes, asyncio.Task] = {}
+
+
+@inject
+async def _notify(
+    callsign: bytes, pm: "PluginManager" = Provide[Container.plugin_manager]
+) -> None:
+    await asyncio.sleep(0.5)
+    async with lock:
+        if (data := atis.get(callsign, None)) is not None:
+            pm.trigger_event_auditers_nonblock(
+                "plugin_whazzup_new_atis", (callsign, data), {}
+            )
+
+
+async def _add_atis(callsign: bytes, line: bytes) -> None:
+    async with lock:
+        atis.setdefault(callsign, []).append(line)
+        if (task := notify_tasks.get(callsign, None)) is not None:
+            task.cancel()
+        task = asyncio.create_task(_notify(callsign))
+        notify_tasks[callsign] = task
+        task.add_done_callback(lambda _: notify_tasks.pop(callsign, None))
+
+
+# ==========
+
+
+@pyfsd_plugin.handle("packet_received")
+async def collect_atis(session: "ClientSession", packet: ServerBoundPacket) -> None:
     """Collect ATIS infoline.
 
     How it works:
@@ -71,35 +112,36 @@ async def collect_atis(protocol: "ClientProtocol", line: bytes) -> None:
         ATC:    "$CQ<callsign>:@<frequency>:NEWINFO" --> server (EuroScope ~3.2.9)
     """
 
-    def add_atis(line: bytes, callsign: bytes) -> None:
-        if callsign not in atis:
-            # If the statement (^) is false when executing if statement and
-            atis[callsign] = []
-            # ^ when this statement, self.atis[callsign] exists, then ATISs before
-            # maybe overrode FIXME
-        atis[callsign].append(line)
-
     if (
-        (command := line[:3]) in (b"#TM", b"$CR", b"$CQ")
-        and (packet_len := len(parts := line.split(b":", maxsplit=6))) >= 3
-        and protocol.client
-        and protocol.client.callsign == (callsign := parts[0][3:])
+        not isinstance(packet, MulticastPacket)
+        or (client := session.get_client()) is None
+        or not client.is_controller
     ):
-        if parts[1] == b"atis_collector":
-            if command == b"#TM":
-                add_atis(parts[2], callsign)
-                raise PreventEvent
-            if (
-                command == b"$CR"
-                and packet_len >= 5
-                and parts[2] == b"ATIS"
-                and parts[3] == b"T"
-            ):
-                add_atis(parts[4], callsign)
-                raise PreventEvent
-        if parts[2] == b"NEWINFO":
-            atis[callsign] = []
-            protocol.send_line(b"$CQatis_collector:%s:ATIS" % protocol.client.callsign)
+        return
+
+    match packet.command:
+        case FSDClientCommand.MESSAGE if (
+            packet.dest == b"atis_collector" and packet.data is not None
+        ):
+            await _add_atis(packet.source, packet.data)
+            raise PreventEvent
+        case FSDClientCommand.CLIENT_RESPONSE if (
+            packet.dest == b"atis_collector"
+            and packet.data is not None
+            and packet.data.startswith(b"ATIS:T:")
+        ):
+            await _add_atis(packet.source, packet.data.removeprefix(b"ATIS:T:"))
+            raise PreventEvent
+        case FSDClientCommand.CLIENT_QUERY if packet.data == b"NEWINFO":
+            atis[client.callsign] = []
+            session.send_packets(
+                MulticastPacket(
+                    FSDClientCommand.CLIENT_QUERY,
+                    b"atis_collector",
+                    client.callsign,
+                    b"ATIS",
+                )
+            )
 
 
 @inject
@@ -113,7 +155,7 @@ def generate_whazzup(
         heading_instead_pbh: Use heading instead of PitchBankingHeading.
     """
     whazzup: dict[str, Any] = {"pilot": [], "controllers": []}
-    utc_now = datetime.utcnow()
+    utc_now = datetime.now(timezone.utc)
     whazzup["general"] = {
         "version": 3,
         "reload": 1,
@@ -125,9 +167,9 @@ def generate_whazzup(
             "cid": client.cid,
             "name": client.realname,
             "callsign": client.callsign,
-            "logon_time": datetime.fromtimestamp(client.start_time).strftime(
-                "%Y-%m-%dT%H:%M:%S.%f0Z"
-            ),
+            "logon_time": datetime.fromtimestamp(
+                client.start_time, tz=timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%S.%f0Z"),
             "rating": client.rating,
             "last_updated": client.last_updated,
         }
@@ -194,6 +236,7 @@ def whazzup_json_string(heading_instead_pbh: bool = False) -> str:
     return dumps(
         generate_whazzup(heading_instead_pbh=heading_instead_pbh),
         cls=WhazzupEncoder,
+        ensure_ascii=False
     )
 
 

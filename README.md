@@ -1,3 +1,3 @@
 # pyfsd-plugins
 My plugins for PyFSD.  
-targets tonestory6809/pyfsd@52b901fec8060bd5266138029263f284826c78ea or higher
+targets tonestory6809/pyfsd@d92d026c65932f5067a42d3c38f1d4288be59766 or higher

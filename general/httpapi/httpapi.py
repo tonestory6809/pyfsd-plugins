@@ -23,7 +23,7 @@ from pyfsd.plugin import SimplePlugin
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-    from pyfsd.factory.client import ClientFactory
+    from pyfsd.client.net.factory import ClientFactory
 
 # =============== Decorator
 C = TypeVar("C", bound=Callable)
@@ -292,7 +292,7 @@ async def delete_user(
 pyfsd_plugin = SimplePlugin(
     "httpapi",
     (5, 0),
-    (5, "0.1.3"),
+    (6, "0.1.4"),
     {"port": int, "token": str, "enable_default_api": bool},
 )
 runner: "web.AppRunner | None" = None
