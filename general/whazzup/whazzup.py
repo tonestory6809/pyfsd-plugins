@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from json import JSONEncoder, dumps
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs
 
 from dependency_injector.wiring import Provide, inject
 
@@ -23,10 +24,11 @@ if TYPE_CHECKING:
 
 
 atis: dict[bytes, list[bytes]] = {}
+aircraft: dict[bytes, dict[bytes, bytes]] = {}
 pyfsd_plugin = SimplePlugin(
     "whazzup",
     (5, 0),
-    (4, "0.2.0"),
+    (5, "0.3.0"),
     {
         "use_heading": bool,
         "client_coding": str,
@@ -49,8 +51,8 @@ class WhazzupEncoder(JSONEncoder):
 
 
 @pyfsd_plugin.audit("new_client_created")
-async def fetch_atis(client: "Client") -> None:
-    """Ask new ATCs send their ATISs."""
+async def fetch_atis_aircraft(client: "Client") -> None:
+    """Ask new ATCs for ATISs and pilots for aircraft information."""
     if client.is_controller:
         client.session.send_packets(
             MulticastPacket(
@@ -58,6 +60,12 @@ async def fetch_atis(client: "Client") -> None:
                 b"atis_collector",
                 client.callsign,
                 b"ATIS",
+            )
+        )
+    else:
+        client.session.send_packets(
+            MulticastPacket(
+                FSDClientCommand.SQUAWK_BOX, b"atis_collector", client.callsign, b"PIR"
             )
         )
 
@@ -100,8 +108,13 @@ async def _add_atis(callsign: bytes, line: bytes) -> None:
 
 
 @pyfsd_plugin.handle("packet_received")
-async def collect_atis(session: "ClientSession", packet: ServerBoundPacket) -> None:
-    """Collect ATIS infoline.
+@inject
+async def collect_atis_aircraft(
+    session: "ClientSession",
+    packet: ServerBoundPacket,
+    pm: "PluginManager" = Provide[Container.plugin_manager],
+) -> None:
+    """Collect ATIS infoline and pilot aircraft.
 
     How it works:
         server: "$CQserver:<callsign>:ATIS" --> ATC
@@ -110,29 +123,34 @@ async def collect_atis(session: "ClientSession", packet: ServerBoundPacket) -> N
         ------
         (ATC changed infoline)
         ATC:    "$CQ<callsign>:@<frequency>:NEWINFO" --> server (EuroScope ~3.2.9)
+        ========
+        server: "#SBserver:<callsign>:PIR"
+        pilot:  "#SB<callsign>:server:PI:GEN:EQUIPMENT=...:AIRLINE=...:LIVERY=..."
     """
 
     if (
         not isinstance(packet, MulticastPacket)
         or (client := session.get_client()) is None
-        or not client.is_controller
+        or packet.data is None
     ):
         return
 
     match packet.command:
         case FSDClientCommand.MESSAGE if (
-            packet.dest == b"atis_collector" and packet.data is not None
+            client.is_controller and packet.dest == b"atis_collector"
         ):
             await _add_atis(packet.source, packet.data)
             raise PreventEvent
         case FSDClientCommand.CLIENT_RESPONSE if (
-            packet.dest == b"atis_collector"
-            and packet.data is not None
+            client.is_controller
+            and packet.dest == b"atis_collector"
             and packet.data.startswith(b"ATIS:T:")
         ):
             await _add_atis(packet.source, packet.data.removeprefix(b"ATIS:T:"))
             raise PreventEvent
-        case FSDClientCommand.CLIENT_QUERY if packet.data == b"NEWINFO":
+        case FSDClientCommand.CLIENT_QUERY if (
+            client.is_controller and packet.data == b"NEWINFO"
+        ):
             atis[client.callsign] = []
             session.send_packets(
                 MulticastPacket(
@@ -142,6 +160,20 @@ async def collect_atis(session: "ClientSession", packet: ServerBoundPacket) -> N
                     b"ATIS",
                 )
             )
+        case FSDClientCommand.SQUAWK_BOX if (
+            not client.is_controller
+            and packet.dest == b"atis_collector"
+            and packet.data.startswith(b"PI:GEN:")
+        ):
+            data = parse_qs(packet.data.removeprefix(b"PI:GEN:"), separator=":")
+            result = {}
+            for key in data:
+                result[key] = data[key][-1]
+            aircraft[client.callsign] = result
+            await pm.trigger_event_auditers(
+                "plugin_whazzup_aircraft", (client.callsign, result), {}
+            )
+            raise PreventEvent
 
 
 @inject
@@ -236,7 +268,7 @@ def whazzup_json_string(heading_instead_pbh: bool = False) -> str:
     return dumps(
         generate_whazzup(heading_instead_pbh=heading_instead_pbh),
         cls=WhazzupEncoder,
-        ensure_ascii=False
+        ensure_ascii=False,
     )
 
 
