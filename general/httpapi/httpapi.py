@@ -16,7 +16,7 @@ from structlog import get_logger
 from typing_extensions import NotRequired
 
 from pyfsd.db_tables import users_table
-from pyfsd.define.check_dict import VerifyKeyError, check_dict
+from pyfsd.define.check_dict import DictStructure, VerifyKeyError, check_dict
 from pyfsd.dependencies import Container
 from pyfsd.plugin import SimplePlugin
 
@@ -30,7 +30,9 @@ C = TypeVar("C", bound=Callable)
 hasher = PasswordHasher()
 
 
-def check(auth: bool = False, body_format: dict | None = None) -> Callable[[C], C]:
+def check(
+    auth: bool = False, body_format: DictStructure | None = None
+) -> Callable[[C], C]:
     """Annotate a handler."""
 
     def decorator(func: C) -> C:
@@ -292,7 +294,7 @@ async def delete_user(
 pyfsd_plugin = SimplePlugin(
     "httpapi",
     (5, 0),
-    (6, "0.1.4"),
+    (7, "0.1.5"),
     {"port": int, "token": str, "enable_default_api": bool},
 )
 runner: "web.AppRunner | None" = None
