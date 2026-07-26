@@ -1,4 +1,4 @@
-"""General plugin, whazzup.py, 3, 0.1.0."""
+"""General plugin, whazzup.py, 6, 0.3.1."""
 
 import asyncio
 from datetime import datetime, timezone
@@ -28,11 +28,12 @@ aircraft: dict[bytes, dict[bytes, bytes]] = {}
 pyfsd_plugin = SimplePlugin(
     "whazzup",
     (5, 0),
-    (5, "0.3.0"),
+    (6, "0.3.1"),
     {
         "use_heading": bool,
-        "client_coding": str,
+        "encoding": str,
         "register_httpapi": bool,
+        "httpapi_require_auth": bool,
     },
 )
 
@@ -45,7 +46,7 @@ class WhazzupEncoder(JSONEncoder):
         """Helper to decode bytes."""
         if isinstance(o, bytes):
             return o.decode(
-                encoding=config["plugin"]["whazzup"]["client_coding"], errors="replace"
+                encoding=config["plugin"]["whazzup"]["encoding"], errors="replace"
             )
         return super().default(o)
 
@@ -124,8 +125,8 @@ async def collect_atis_aircraft(
         (ATC changed infoline)
         ATC:    "$CQ<callsign>:@<frequency>:NEWINFO" --> server (EuroScope ~3.2.9)
         ========
-        server: "#SBserver:<callsign>:PIR"
-        pilot:  "#SB<callsign>:server:PI:GEN:EQUIPMENT=...:AIRLINE=...:LIVERY=..."
+        server: "#SBserver:<callsign>:PIR" --> Pilot
+        pilot:  "#SB<callsign>:server:PI:GEN:EQUIPMENT=...:AIRLINE=...:LIVERY=..." --> server
     """
 
     if (
@@ -245,6 +246,12 @@ def generate_whazzup(
                     "route": client.flight_plan.route,
                     "revision_id": client.flight_plan.revision,
                 }
+            if (data := aircraft.get(client.callsign, None)) is not None:
+                client_info["aircraft_info"] = {
+                    "equipment": data.get(b"EQUIPMENT", None),
+                    "airline": data.get(b"AIRLINE", None),
+                    "livery": data.get(b"LIVERY", None),
+                }
         else:
             if client.frequency_ok:
                 client_info["frequency"] = (
@@ -280,7 +287,7 @@ async def startup(config: dict = Provide[Container.config]) -> None:
     if plugin_config["register_httpapi"]:
         from aiohttp.web import Response, get
 
-        from .httpapi import app  # This may raise
+        from .httpapi import app, check  # This may raise
 
         async def generate_whazzup(_: "Request") -> "Response":
             return Response(
@@ -290,4 +297,13 @@ async def startup(config: dict = Provide[Container.config]) -> None:
                 content_type="application/json",
             )
 
-        app.add_routes([get("/whazzup.json", generate_whazzup)])
+        app.add_routes(
+            [
+                get(
+                    "/whazzup.json",
+                    check(auth=True)(generate_whazzup)
+                    if plugin_config["httpapi_require_auth"]
+                    else generate_whazzup,
+                )
+            ]
+        )
