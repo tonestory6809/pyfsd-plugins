@@ -28,7 +28,7 @@ aircraft: dict[bytes, dict[bytes, bytes]] = {}
 pyfsd_plugin = SimplePlugin(
     "whazzup",
     (5, 0),
-    (6, "0.3.1"),
+    (7, "0.3.2"),
     {
         "use_heading": bool,
         "encoding": str,
@@ -150,7 +150,7 @@ async def collect_atis_aircraft(
             await _add_atis(packet.source, packet.data.removeprefix(b"ATIS:T:"))
             raise PreventEvent
         case FSDClientCommand.CLIENT_QUERY if (
-            client.is_controller and packet.data == b"NEWINFO"
+            client.is_controller and packet.data.startswith(b"NEWINFO")
         ):
             atis[client.callsign] = []
             session.send_packets(
